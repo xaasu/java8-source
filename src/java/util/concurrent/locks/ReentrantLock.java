@@ -107,7 +107,7 @@ import java.util.Collection;
 public class ReentrantLock implements Lock, java.io.Serializable {
     private static final long serialVersionUID = 7373984872572414699L;
     /**
-     * AQS的之类，锁状态器
+     * AQS的子类，锁状态器
      */
     private final Sync sync;
 

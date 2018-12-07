@@ -775,6 +775,7 @@ public abstract class AbstractQueuedSynchronizer
 
     /**
      * 当前同步器是否在独占式模式下被线程占用，一般该方法表示是否被当前线程所独占。只有用到condition才需要去实现它。
+     * 给Condition使用具体实现见{@link ReentrantLock.Sync#isHeldByCurrentThread()}
      */
     protected boolean isHeldExclusively() {
         throw new UnsupportedOperationException();
@@ -1030,7 +1031,7 @@ public abstract class AbstractQueuedSynchronizer
     }
 
     /**
-     * 判断当前线程是否在队列最前面（1号节点，以为head节点不包含线程信息）
+     * 判断当前线程是否在队列最前面（1号节点，因为head节点不包含线程信息）
      */
     public final boolean hasQueuedPredecessors() {
         // The correctness of this depends on head being initialized
@@ -1146,39 +1147,34 @@ public abstract class AbstractQueuedSynchronizer
     // Internal support methods for Conditions
 
     /**
-     * Returns true if a node, always one that was initially placed on
-     * a condition queue, is now waiting to reacquire on sync queue.
+     * 判断节点是否在AQS队列中(不是Condition队列)
      *
      * @param node the node
      * @return true if is reacquiring
      */
     final boolean isOnSyncQueue(Node node) {
+        //Condition队列的节点没有设置前驱节点，并且状态为2，只要满足一点，便说明节点还在Condition队列中
         if (node.waitStatus == Node.CONDITION || node.prev == null)
             return false;
+        //既然节点不在Condition队列中，那么如果节点后继节点不为空，必然在AQS队列了
         if (node.next != null) // If has successor, it must be on queue
             return true;
-        /*
-         * node.prev can be non-null, but not yet on queue because
-         * the CAS to place it on queue can fail. So we have to
-         * traverse from tail to make sure it actually made it.  It
-         * will always be near the tail in calls to this method, and
-         * unless the CAS failed (which is unlikely), it will be
-         * there, so we hardly ever traverse much.
-         */
+        //代码走到这里还没返回，遍历整个队列，看是否能找到node
         return findNodeFromTail(node);
     }
 
     /**
-     * Returns true if node is on sync queue by searching backwards from tail.
-     * Called only when needed by isOnSyncQueue.
+     * 判断节点是否在AQS队列中
      *
      * @return true if present
      */
     private boolean findNodeFromTail(Node node) {
         Node t = tail;
+        //从尾节点开始遍历
         for (; ; ) {
             if (t == node)
                 return true;
+            //到头结点还没找到node
             if (t == null)
                 return false;
             t = t.prev;
@@ -1186,8 +1182,7 @@ public abstract class AbstractQueuedSynchronizer
     }
 
     /**
-     * Transfers a node from a condition queue onto sync queue.
-     * Returns true if successful.
+     * 将节点加入AQS队列
      *
      * @param node the node
      * @return true if successfully transferred (else the node was
@@ -1195,66 +1190,63 @@ public abstract class AbstractQueuedSynchronizer
      */
     final boolean transferForSignal(Node node) {
         /*
-         * If cannot change waitStatus, the node has been cancelled.
+         * 节点已取消
          */
         if (!compareAndSetWaitStatus(node, Node.CONDITION, 0))
             return false;
 
-        /*
-         * Splice onto queue and try to set waitStatus of predecessor to
-         * indicate that thread is (probably) waiting. If cancelled or
-         * attempt to set waitStatus fails, wake up to resync (in which
-         * case the waitStatus can be transiently and harmlessly wrong).
-         */
+        //将node加入AQS队列，p是原来的尾节点
         Node p = enq(node);
         int ws = p.waitStatus;
+        //p已经取消，或者CAS更新p为-1失败，直接唤醒
         if (ws > 0 || !compareAndSetWaitStatus(p, ws, Node.SIGNAL))
+            //唤醒目标线程
             LockSupport.unpark(node.thread);
         return true;
     }
 
     /**
-     * Transfers node, if necessary, to sync queue after a cancelled wait.
-     * Returns true if thread was cancelled before being signalled.
+     * Condition节点因为超时或者中断被取消，加入AQS队列等待唤醒
      *
      * @param node the node
-     * @return true if cancelled before the node was signalled
+     * @return 线程是否因为中断从park中唤醒
      */
     final boolean transferAfterCancelledWait(Node node) {
+        //中断发生时，是否有signal操作来“掺和”来返回结果，因为signal()也会将node插入AQS队列
+
+        //CAS修改节点状态成功说明没有signal()发生
         if (compareAndSetWaitStatus(node, Node.CONDITION, 0)) {
+            //将节点加入队列
             enq(node);
             return true;
         }
-        /*
-         * If we lost out to a signal(), then we can't proceed
-         * until it finishes its enq().  Cancelling during an
-         * incomplete transfer is both rare and transient, so just
-         * spin.
-         */
+        //CAS失败说明可能有signal()发生，在返回false之前，需要做等待处理，等待signal将node插入AQS队列
         while (!isOnSyncQueue(node))
             Thread.yield();
         return false;
     }
 
     /**
-     * Invokes release with current state value; returns saved state.
-     * Cancels node and throws exception on failure.
+     * 释放锁独占锁
      *
      * @param node the condition node for this wait
-     * @return previous sync state
+     * @return previous sync state 释放之前的state
      */
     final int fullyRelease(Node node) {
         boolean failed = true;
         try {
             int savedState = getState();
+            //释放锁
             if (release(savedState)) {
                 failed = false;
                 return savedState;
             } else {
+                //释放失败抛异常
                 throw new IllegalMonitorStateException();
             }
         } finally {
             if (failed)
+                //失败将waitStatus状态更新为1
                 node.waitStatus = Node.CANCELLED;
         }
     }
@@ -1262,32 +1254,14 @@ public abstract class AbstractQueuedSynchronizer
     // Instrumentation methods for conditions
 
     /**
-     * Queries whether the given ConditionObject
-     * uses this synchronizer as its lock.
-     *
-     * @param condition the condition
-     * @return {@code true} if owned
-     * @throws NullPointerException if the condition is null
+     * 判断Condition是否由当前AQS同步器创建
      */
     public final boolean owns(ConditionObject condition) {
         return condition.isOwnedBy(this);
     }
 
     /**
-     * Queries whether any threads are waiting on the given condition
-     * associated with this synchronizer. Note that because timeouts
-     * and interrupts may occur at any time, a {@code true} return
-     * does not guarantee that a future {@code signal} will awaken
-     * any threads.  This method is designed primarily for use in
-     * monitoring of the system state.
-     *
-     * @param condition the condition
-     * @return {@code true} if there are any waiting threads
-     * @throws IllegalMonitorStateException if exclusive synchronization
-     *                                      is not held
-     * @throws IllegalArgumentException     if the given condition is
-     *                                      not associated with this synchronizer
-     * @throws NullPointerException         if the condition is null
+     * 判断是否有线程在等待Condition
      */
     public final boolean hasWaiters(ConditionObject condition) {
         if (!owns(condition))
@@ -1296,20 +1270,7 @@ public abstract class AbstractQueuedSynchronizer
     }
 
     /**
-     * Returns an estimate of the number of threads waiting on the
-     * given condition associated with this synchronizer. Note that
-     * because timeouts and interrupts may occur at any time, the
-     * estimate serves only as an upper bound on the actual number of
-     * waiters.  This method is designed for use in monitoring of the
-     * system state, not for synchronization control.
-     *
-     * @param condition the condition
-     * @return the estimated number of waiting threads
-     * @throws IllegalMonitorStateException if exclusive synchronization
-     *                                      is not held
-     * @throws IllegalArgumentException     if the given condition is
-     *                                      not associated with this synchronizer
-     * @throws NullPointerException         if the condition is null
+     * Condition队列长度
      */
     public final int getWaitQueueLength(ConditionObject condition) {
         if (!owns(condition))
@@ -1318,20 +1279,7 @@ public abstract class AbstractQueuedSynchronizer
     }
 
     /**
-     * Returns a collection containing those threads that may be
-     * waiting on the given condition associated with this
-     * synchronizer.  Because the actual set of threads may change
-     * dynamically while constructing this result, the returned
-     * collection is only a best-effort estimate. The elements of the
-     * returned collection are in no particular order.
-     *
-     * @param condition the condition
-     * @return the collection of threads
-     * @throws IllegalMonitorStateException if exclusive synchronization
-     *                                      is not held
-     * @throws IllegalArgumentException     if the given condition is
-     *                                      not associated with this synchronizer
-     * @throws NullPointerException         if the condition is null
+     * Condition队列中的等待线程
      */
     public final Collection<Thread> getWaitingThreads(ConditionObject condition) {
         if (!owns(condition))
@@ -1340,33 +1288,21 @@ public abstract class AbstractQueuedSynchronizer
     }
 
     /**
-     * Condition implementation for a {@link
-     * AbstractQueuedSynchronizer} serving as the basis of a {@link
-     * Lock} implementation.
-     *
-     * <p>Method documentation for this class describes mechanics,
-     * not behavioral specifications from the point of view of Lock
-     * and Condition users. Exported versions of this class will in
-     * general need to be accompanied by documentation describing
-     * condition semantics that rely on those of the associated
-     * {@code AbstractQueuedSynchronizer}.
-     *
-     * <p>This class is Serializable, but all fields are transient,
-     * so deserialized conditions have no waiters.
+     * 条件队列
      */
     public class ConditionObject implements Condition, java.io.Serializable {
         private static final long serialVersionUID = 1173984872572414699L;
         /**
-         * First node of condition queue.
+         * 头节点
          */
         private transient Node firstWaiter;
         /**
-         * Last node of condition queue.
+         * 尾节点
          */
         private transient Node lastWaiter;
 
         /**
-         * Creates a new {@code ConditionObject} instance.
+         * 无参构造器
          */
         public ConditionObject() {
         }
@@ -1374,49 +1310,60 @@ public abstract class AbstractQueuedSynchronizer
         // Internal methods
 
         /**
-         * Adds a new waiter to wait queue.
-         *
-         * @return its new wait node
+         * 往Condition等待队列中新增节点,等待队列是一个单链表，只维护了后继，没有设置前驱
          */
         private Node addConditionWaiter() {
+            //Condition对队列的操作没考虑并发，因为对应的操作都是在线程获得锁之后才进行的
+
+            //尾节点
             Node t = lastWaiter;
-            // If lastWaiter is cancelled, clean out.
+            // 尾节点状态不是-2，说明无效，清除
+            //Condition里面的节点状态只能是0和-2，否则就是无效节点
             if (t != null && t.waitStatus != Node.CONDITION) {
+                //清除队列中无效的节点
                 unlinkCancelledWaiters();
+                //重新将新的尾节点赋值给t
                 t = lastWaiter;
             }
+            //新建一个当前节点
             Node node = new Node(Thread.currentThread(), Node.CONDITION);
+            //如果尾节点为空
             if (t == null)
+                //初始化队列，当前节点设为头结点
                 firstWaiter = node;
             else
+                //原尾节点的后继节点设置为当前节点
                 t.nextWaiter = node;
+            //当前节点设置为新的尾节点
             lastWaiter = node;
             return node;
         }
 
         /**
-         * Removes and transfers nodes until hit non-cancelled one or
-         * null. Split out from signal in part to encourage compilers
-         * to inline the case of no waiters.
+         * 唤醒Condition队列中的第一个节点
          *
          * @param first (non-null) the first node on condition queue
          */
         private void doSignal(Node first) {
             do {
+                //下面的操作是把first从队列移除
                 if ((firstWaiter = first.nextWaiter) == null)
                     lastWaiter = null;
                 first.nextWaiter = null;
             } while (!transferForSignal(first) &&
                     (first = firstWaiter) != null);
+            //transferForSignal(first)为true，退出循环，说明节点已经唤醒
+            //否则把first赋值给下个节点继续尝试唤醒，直到有一个节点被唤醒，或者所有节点都唤醒失败
         }
 
         /**
-         * Removes and transfers all nodes.
+         * 唤醒所有Condition队列中的节点
          *
          * @param first (non-null) the first node on condition queue
          */
         private void doSignalAll(Node first) {
             lastWaiter = firstWaiter = null;
+            //和doSignal()类似，只不过doSignal()是唤醒一个就退出循环，而doSignalAll是唤醒所有，直到Condition队列为空
             do {
                 Node next = first.nextWaiter;
                 first.nextWaiter = null;
@@ -1426,33 +1373,29 @@ public abstract class AbstractQueuedSynchronizer
         }
 
         /**
-         * Unlinks cancelled waiter nodes from condition queue.
-         * Called only while holding lock. This is called when
-         * cancellation occurred during condition wait, and upon
-         * insertion of a new waiter when lastWaiter is seen to have
-         * been cancelled. This method is needed to avoid garbage
-         * retention in the absence of signals. So even though it may
-         * require a full traversal, it comes into play only when
-         * timeouts or cancellations occur in the absence of
-         * signals. It traverses all nodes rather than stopping at a
-         * particular target to unlink all pointers to garbage nodes
-         * without requiring many re-traversals during cancellation
-         * storms.
+         * 清空队列中的无效节点，无效节点的定义：状态不是-2
          */
         private void unlinkCancelledWaiters() {
             Node t = firstWaiter;
+            //上一个被遍历的节点
             Node trail = null;
+            //从头结点开始遍历队列，移除无效节点
             while (t != null) {
                 Node next = t.nextWaiter;
                 if (t.waitStatus != Node.CONDITION) {
+                    //t无效，设置后继节点为null，便于gc
                     t.nextWaiter = null;
+                    //trail未被赋值，说明前面没节点，直接将头结点设为next
                     if (trail == null)
                         firstWaiter = next;
                     else
+                        //trail的后继节点设置为next
                         trail.nextWaiter = next;
+                    //next为null，说明到尾节点了
                     if (next == null)
                         lastWaiter = trail;
                 } else
+                    //t有效，跳过
                     trail = t;
                 t = next;
             }
@@ -1461,24 +1404,25 @@ public abstract class AbstractQueuedSynchronizer
         // public methods
 
         /**
-         * Moves the longest-waiting thread, if one exists, from the
-         * wait queue for this condition to the wait queue for the
-         * owning lock.
+         * 唤醒一个等待唤醒的线程，这里的唤醒，线程不会立刻苏醒，因为线程需要重新获得锁才可以真正的苏醒
+         * 因此此方法要做的是将节点移至AQS等待队列
          *
          * @throws IllegalMonitorStateException if {@link #isHeldExclusively}
          *                                      returns {@code false}
          */
         public final void signal() {
+            //如果持有锁的线程不是当前线程
             if (!isHeldExclusively())
                 throw new IllegalMonitorStateException();
+            //唤醒的其实是Condition队列中的第一个节点
             Node first = firstWaiter;
             if (first != null)
+                //唤醒
                 doSignal(first);
         }
 
         /**
-         * Moves all threads from the wait queue for this condition to
-         * the wait queue for the owning lock.
+         * 唤醒所有等待节点，效果同signal()，将所有的Condition队列中的节点转移至AQS队列等待真正的唤醒
          *
          * @throws IllegalMonitorStateException if {@link #isHeldExclusively}
          *                                      returns {@code false}
@@ -1492,25 +1436,22 @@ public abstract class AbstractQueuedSynchronizer
         }
 
         /**
-         * Implements uninterruptible condition wait.
-         * <ol>
-         * <li> Save lock state returned by {@link #getState}.
-         * <li> Invoke {@link #release} with saved state as argument,
-         * throwing IllegalMonitorStateException if it fails.
-         * <li> Block until signalled.
-         * <li> Reacquire by invoking specialized version of
-         * {@link #acquire} with saved state as argument.
-         * </ol>
+         * 当前线程进入等待状态直到被通知，在此过程中对中断信号不敏感，不支持中断当前线程
          */
         public final void awaitUninterruptibly() {
+            //将节点加入Condition队列
             Node node = addConditionWaiter();
+            //释放当前锁
             int savedState = fullyRelease(node);
             boolean interrupted = false;
+            //和await()区别是线程中断不会退出循环
             while (!isOnSyncQueue(node)) {
                 LockSupport.park(this);
+                //如果线程曾今被中断
                 if (Thread.interrupted())
                     interrupted = true;
             }
+            //恢复之前的锁状态并相应中断
             if (acquireQueued(node, savedState) || interrupted)
                 selfInterrupt();
         }
@@ -1523,20 +1464,20 @@ public abstract class AbstractQueuedSynchronizer
          */
 
         /**
-         * Mode meaning to reinterrupt on exit from wait
+         * 线程在等待过程中发生了中断，但不需要抛出异常
          */
         private static final int REINTERRUPT = 1;
         /**
-         * Mode meaning to throw InterruptedException on exit from wait
+         * 线程在等待过程中发生了中断，且需要抛出异常
          */
         private static final int THROW_IE = -1;
 
         /**
-         * Checks for interrupt, returning THROW_IE if interrupted
-         * before signalled, REINTERRUPT if after signalled, or
-         * 0 if not interrupted.
+         * 判断线程在等待过程中是否被中断
          */
         private int checkInterruptWhileWaiting(Node node) {
+            //如果线程被中断，调用transferAfterCancelledWait()将节点转移至AQS队列
+            //未被中断直接返回0
             return Thread.interrupted() ?
                     (transferAfterCancelledWait(node) ? THROW_IE : REINTERRUPT) :
                     0;
@@ -1555,91 +1496,85 @@ public abstract class AbstractQueuedSynchronizer
         }
 
         /**
-         * Implements interruptible condition wait.
-         * <ol>
-         * <li> If current thread is interrupted, throw InterruptedException.
-         * <li> Save lock state returned by {@link #getState}.
-         * <li> Invoke {@link #release} with saved state as argument,
-         * throwing IllegalMonitorStateException if it fails.
-         * <li> Block until signalled or interrupted.
-         * <li> Reacquire by invoking specialized version of
-         * {@link #acquire} with saved state as argument.
-         * <li> If interrupted while blocked in step 4, throw InterruptedException.
-         * </ol>
+         * 当前线程进入等待状态直到被通知或者被中断
+         *
+         * @throws InterruptedException 如果中断，抛出
          */
         public final void await() throws InterruptedException {
+            //判断线程是否曾经中断
             if (Thread.interrupted())
                 throw new InterruptedException();
+            //将线程加入Condition的等待队列并返回生成的节点
             Node node = addConditionWaiter();
+            //fullRelease会调用release释放原有的锁，如果没有锁，将会报错，因此使用await的前提就是线程已经得到独占锁
+            //记录之前的state，唤醒后需要恢复状态，不然后续unlock()将报错
             int savedState = fullyRelease(node);
+
             int interruptMode = 0;
+            //node节点不在AQS队列中，说明还没被signal()
             while (!isOnSyncQueue(node)) {
+                //阻塞线程，等待唤醒
                 LockSupport.park(this);
+                //代码走到这说明线程被唤醒，可能是其他线程唤醒，也可能是中断唤醒
                 if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+                    //线程被中断过，退出自旋
                     break;
             }
+            //将node节点加入等待队列并等待获得资源，恢复await前的状态
             if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
+                //返回true说明线程被中断了，更新状态，后面补上中断处理
                 interruptMode = REINTERRUPT;
             if (node.nextWaiter != null) // clean up if cancelled
+                //清除无效节点，其实node已经无效了，因为已经唤醒了接下来要做的事情是AQS，与Condition无关了
                 unlinkCancelledWaiters();
             if (interruptMode != 0)
+                //响应中断
                 reportInterruptAfterWait(interruptMode);
         }
 
         /**
-         * Implements timed condition wait.
-         * <ol>
-         * <li> If current thread is interrupted, throw InterruptedException.
-         * <li> Save lock state returned by {@link #getState}.
-         * <li> Invoke {@link #release} with saved state as argument,
-         * throwing IllegalMonitorStateException if it fails.
-         * <li> Block until signalled, interrupted, or timed out.
-         * <li> Reacquire by invoking specialized version of
-         * {@link #acquire} with saved state as argument.
-         * <li> If interrupted while blocked in step 4, throw InterruptedException.
-         * </ol>
+         * 当前线程进入等待状态，直到被通知、中断或者超时。如果返回值小于等于0，可以认定就是超时了
          */
         public final long awaitNanos(long nanosTimeout)
                 throws InterruptedException {
             if (Thread.interrupted())
                 throw new InterruptedException();
+            //加入Condition队列
             Node node = addConditionWaiter();
+            //释放锁
             int savedState = fullyRelease(node);
+            //过期时间
             final long deadline = System.nanoTime() + nanosTimeout;
             int interruptMode = 0;
             while (!isOnSyncQueue(node)) {
+                //剩余时间小于0，取消节点
                 if (nanosTimeout <= 0L) {
                     transferAfterCancelledWait(node);
                     break;
                 }
+                //剩余时间大于时间因此
                 if (nanosTimeout >= spinForTimeoutThreshold)
+                    //阻塞指定时间
                     LockSupport.parkNanos(this, nanosTimeout);
+                //判断线程是否被中断
                 if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
                     break;
                 nanosTimeout = deadline - System.nanoTime();
             }
+            //响应中断
             if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
                 interruptMode = REINTERRUPT;
             if (node.nextWaiter != null)
                 unlinkCancelledWaiters();
             if (interruptMode != 0)
                 reportInterruptAfterWait(interruptMode);
+            //返回耗时
             return deadline - System.nanoTime();
         }
 
         /**
-         * Implements absolute timed condition wait.
-         * <ol>
-         * <li> If current thread is interrupted, throw InterruptedException.
-         * <li> Save lock state returned by {@link #getState}.
-         * <li> Invoke {@link #release} with saved state as argument,
-         * throwing IllegalMonitorStateException if it fails.
-         * <li> Block until signalled, interrupted, or timed out.
-         * <li> Reacquire by invoking specialized version of
-         * {@link #acquire} with saved state as argument.
-         * <li> If interrupted while blocked in step 4, throw InterruptedException.
-         * <li> If timed out while blocked in step 4, return false, else true.
-         * </ol>
+         * 当前线程进入等待状态，直到被通知、中断或者超时。
+         * 代码基本和awaitNanos一致
          */
         public final boolean awaitUntil(Date deadline)
                 throws InterruptedException {
@@ -1669,18 +1604,8 @@ public abstract class AbstractQueuedSynchronizer
         }
 
         /**
-         * Implements timed condition wait.
-         * <ol>
-         * <li> If current thread is interrupted, throw InterruptedException.
-         * <li> Save lock state returned by {@link #getState}.
-         * <li> Invoke {@link #release} with saved state as argument,
-         * throwing IllegalMonitorStateException if it fails.
-         * <li> Block until signalled, interrupted, or timed out.
-         * <li> Reacquire by invoking specialized version of
-         * {@link #acquire} with saved state as argument.
-         * <li> If interrupted while blocked in step 4, throw InterruptedException.
-         * <li> If timed out while blocked in step 4, return false, else true.
-         * </ol>
+         * 当前线程进入等待状态，直到被通知、中断或者超时。
+         * *代码基本和awaitNanos一致
          */
         public final boolean await(long time, TimeUnit unit)
                 throws InterruptedException {
@@ -1715,8 +1640,7 @@ public abstract class AbstractQueuedSynchronizer
         //  support for instrumentation
 
         /**
-         * Returns true if this condition was created by the given
-         * synchronization object.
+         * 判断Condition是否属于sync.
          *
          * @return {@code true} if owned
          */
@@ -1725,12 +1649,7 @@ public abstract class AbstractQueuedSynchronizer
         }
 
         /**
-         * Queries whether any threads are waiting on this condition.
-         * Implements {@link AbstractQueuedSynchronizer#hasWaiters(ConditionObject)}.
-         *
-         * @return {@code true} if there are any waiting threads
-         * @throws IllegalMonitorStateException if {@link #isHeldExclusively}
-         *                                      returns {@code false}
+         * 判断Condition队列是否有线程在等待
          */
         protected final boolean hasWaiters() {
             if (!isHeldExclusively())
@@ -1743,13 +1662,7 @@ public abstract class AbstractQueuedSynchronizer
         }
 
         /**
-         * Returns an estimate of the number of threads waiting on
-         * this condition.
-         * Implements {@link AbstractQueuedSynchronizer#getWaitQueueLength(ConditionObject)}.
-         *
-         * @return the estimated number of waiting threads
-         * @throws IllegalMonitorStateException if {@link #isHeldExclusively}
-         *                                      returns {@code false}
+         * 获得Condition队列的长度
          */
         protected final int getWaitQueueLength() {
             if (!isHeldExclusively())
@@ -1763,13 +1676,7 @@ public abstract class AbstractQueuedSynchronizer
         }
 
         /**
-         * Returns a collection containing those threads that may be
-         * waiting on this Condition.
-         * Implements {@link AbstractQueuedSynchronizer#getWaitingThreads(ConditionObject)}.
-         *
-         * @return the collection of threads
-         * @throws IllegalMonitorStateException if {@link #isHeldExclusively}
-         *                                      returns {@code false}
+         * 获得Condition队列中的线程
          */
         protected final Collection<Thread> getWaitingThreads() {
             if (!isHeldExclusively())
