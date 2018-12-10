@@ -420,7 +420,7 @@ public class ReentrantLock implements Lock, java.io.Serializable {
     }
 
     /**
-     * Condtion等待深度
+     * Condition等待深度
      */
     public int getWaitQueueLength(Condition condition) {
         if (condition == null)
