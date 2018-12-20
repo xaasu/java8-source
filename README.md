@@ -2,3 +2,5 @@
 * **AbstractQueuedSynchronizer**
 * **ReentrantLock**
 * **Condition**
+* **CountDownLatch**
+* **Semaphore**
