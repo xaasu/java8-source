@@ -1568,7 +1568,7 @@ public abstract class AbstractQueuedSynchronizer
                 unlinkCancelledWaiters();
             if (interruptMode != 0)
                 reportInterruptAfterWait(interruptMode);
-            //返回耗时
+            //返回剩余时间
             return deadline - System.nanoTime();
         }
 
