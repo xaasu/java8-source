@@ -6,3 +6,5 @@ java8.iml
 .idea/encodings.xml
 .idea/checkstyle-idea.xml
 .idea/vcs.xml
+.idea/
+out/
